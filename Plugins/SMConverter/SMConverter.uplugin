@@ -1,0 +1,23 @@
+﻿{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "SMConverter",
+	"Description": "Convert SM to ISM or HISM and can Revert to original SM",
+	"Category": "Other",
+	"CreatedBy": "Hamza Ben Said",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "SMConverter",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}
