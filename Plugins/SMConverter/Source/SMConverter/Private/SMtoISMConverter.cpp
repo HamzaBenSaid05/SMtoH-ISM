@@ -9,6 +9,7 @@
 #include "Engine/StaticMeshActor.h"
 #include "GameFramework/Actor.h"
 #include "ScopedTransaction.h"
+#include "SMtoISMMaterialCompatibility.h"
 
 // ---------------------------------------------------------------------------
 // Internal Snapshot
@@ -18,26 +19,26 @@
  */
 struct FSMSnapshot
 {
-	FTransform                  WorldTransform; /**< Transform of the component in the world. */
-	UStaticMesh*                Mesh           = nullptr; /**< Pointer to the Static Mesh. */
+	FTransform WorldTransform;             /**< Transform of the component in the world. */
+	UStaticMesh* Mesh = nullptr;           /**< Pointer to the Static Mesh. */
 	TArray<UMaterialInterface*> Materials; /**< Array of materials applied to the component. */
 
-	bool  bCastShadow           = true; /**< Whether the component casts shadows. */
-	bool  bCastDynamicShadow    = true; /**< Whether the component casts dynamic shadows. */
-	bool  bCastStaticShadow     = true; /**< Whether the component casts static shadows. */
-	bool  bCastContactShadow    = false; /**< Whether the component casts contact shadows. */
-	bool  bSelfShadowOnly       = false; /**< Whether the component casts shadows only on itself. */
-	bool  bReceivesDecals       = true; /**< Whether the component receives decals. */
-	bool  bRenderCustomDepth    = false; /**< Whether the component renders in the custom depth pass. */
-	int32 CustomDepthStencil    = 0; /**< Custom depth stencil value. */
-	float BoundsScale           = 1.f; /**< Scale factor for the component's bounds. */
-	int32 ForcedLOD             = 0; /**< Forced Level of Detail (LOD). */
-	int32 MinLOD                = 0; /**< Minimum Level of Detail (LOD). */
-	float MaxDrawDistance       = 0.f; /**< Maximum draw distance for the component. */
-	int32 OverrideLightmapRes   = 64; /**< Resolution for the overridden lightmap. */
-	bool  bOverrideLightmapRes  = false; /**< Whether to override the lightmap resolution. */
+	bool bCastShadow = true;                                        /**< Whether the component casts shadows. */
+	bool bCastDynamicShadow = true;                                 /**< Whether the component casts dynamic shadows. */
+	bool bCastStaticShadow = true;                                  /**< Whether the component casts static shadows. */
+	bool bCastContactShadow = false;                                /**< Whether the component casts contact shadows. */
+	bool bSelfShadowOnly = false;                                   /**< Whether the component casts shadows only on itself. */
+	bool bReceivesDecals = true;                                    /**< Whether the component receives decals. */
+	bool bRenderCustomDepth = false;                                /**< Whether the component renders in the custom depth pass. */
+	int32 CustomDepthStencil = 0;                                   /**< Custom depth stencil value. */
+	float BoundsScale = 1.f;                                        /**< Scale factor for the component's bounds. */
+	int32 ForcedLOD = 0;                                            /**< Forced Level of Detail (LOD). */
+	int32 MinLOD = 0;                                               /**< Minimum Level of Detail (LOD). */
+	float MaxDrawDistance = 0.f;                                    /**< Maximum draw distance for the component. */
+	int32 OverrideLightmapRes = 64;                                 /**< Resolution for the overridden lightmap. */
+	bool bOverrideLightmapRes = false;                              /**< Whether to override the lightmap resolution. */
 	EComponentMobility::Type Mobility = EComponentMobility::Static; /**< Mobility type of the component. */
-	TArray<float> CustomDataFloats; /**< Array of custom data floats for the component. */
+	TArray<float> CustomDataFloats;                                 /**< Array of custom data floats for the component. */
 };
 
 // ---------------------------------------------------------------------------
@@ -51,28 +52,28 @@ static FSMSnapshot SnapshotActor(UStaticMeshComponent* C)
 {
 	FSMSnapshot S;
 	S.WorldTransform = C->GetComponentTransform();
-	S.Mesh           = C->GetStaticMesh();
+	S.Mesh = C->GetStaticMesh();
 
 	const int32 N = C->GetNumMaterials();
 	S.Materials.Reserve(N);
 	for (int32 i = 0; i < N; ++i)
 		S.Materials.Add(C->GetMaterial(i));
 
-	S.bCastShadow          = C->CastShadow;
-	S.bCastDynamicShadow   = C->bCastDynamicShadow;
-	S.bCastStaticShadow    = C->bCastStaticShadow;
-	S.bCastContactShadow   = C->bCastContactShadow;
-	S.bSelfShadowOnly      = C->bSelfShadowOnly;
-	S.bReceivesDecals      = C->bReceivesDecals;
-	S.bRenderCustomDepth   = C->bRenderCustomDepth;
-	S.CustomDepthStencil   = C->CustomDepthStencilValue;
-	S.BoundsScale          = C->BoundsScale;
-	S.ForcedLOD            = C->ForcedLodModel;
-	S.MinLOD               = C->MinLOD;
-	S.MaxDrawDistance      = C->LDMaxDrawDistance;
-	S.OverrideLightmapRes  = C->OverriddenLightMapRes;
+	S.bCastShadow = C->CastShadow;
+	S.bCastDynamicShadow = C->bCastDynamicShadow;
+	S.bCastStaticShadow = C->bCastStaticShadow;
+	S.bCastContactShadow = C->bCastContactShadow;
+	S.bSelfShadowOnly = C->bSelfShadowOnly;
+	S.bReceivesDecals = C->bReceivesDecals;
+	S.bRenderCustomDepth = C->bRenderCustomDepth;
+	S.CustomDepthStencil = C->CustomDepthStencilValue;
+	S.BoundsScale = C->BoundsScale;
+	S.ForcedLOD = C->ForcedLodModel;
+	S.MinLOD = C->MinLOD;
+	S.MaxDrawDistance = C->LDMaxDrawDistance;
+	S.OverrideLightmapRes = C->OverriddenLightMapRes;
 	S.bOverrideLightmapRes = C->bOverrideLightMapRes;
-	S.Mobility             = C->Mobility;
+	S.Mobility = C->Mobility;
 
 	const FCustomPrimitiveData& CPD = C->GetCustomPrimitiveData();
 	const int32 NumCPD = CPD.Data.Num();
@@ -94,30 +95,77 @@ static FSMSnapshot SnapshotActor(UStaticMeshComponent* C)
 static void ApplyProperties(
 	UInstancedStaticMeshComponent* C,
 	const FSMSnapshot& Src,
+	const TArray<UMaterialInterface*>& Materials,
 	const FSMtoISMSettings& Cfg)
 {
 	C->SetStaticMesh(Src.Mesh);
 
-	for (int32 i = 0; i < Src.Materials.Num(); ++i)
-		C->SetMaterial(i, Src.Materials[i]);
+	for (int32 i = 0; i < Materials.Num(); ++i) { C->SetMaterial(i, Materials[i]); }
 
-	C->CastShadow              = Cfg.bReadFromSource ? Src.bCastShadow        : Cfg.bCastShadow;
-	C->bCastDynamicShadow      = Cfg.bReadFromSource ? Src.bCastDynamicShadow : Cfg.bCastDynamicShadow;
-	C->bCastStaticShadow       = Cfg.bReadFromSource ? Src.bCastStaticShadow  : Cfg.bCastStaticShadow;
-	C->bCastContactShadow      = Cfg.bReadFromSource ? Src.bCastContactShadow : Cfg.bCastContactShadow;
-	C->bSelfShadowOnly         = Cfg.bReadFromSource ? Src.bSelfShadowOnly    : Cfg.bSelfShadowOnly;
-	C->bReceivesDecals         = Cfg.bReadFromSource ? Src.bReceivesDecals    : Cfg.bReceivesDecals;
-	C->bRenderCustomDepth      = Cfg.bReadFromSource ? Src.bRenderCustomDepth : Cfg.bRenderCustomDepth;
-	C->CustomDepthStencilValue = Cfg.bReadFromSource ? Src.CustomDepthStencil : Cfg.CustomDepthStencil;
-	C->BoundsScale             = Cfg.bReadFromSource ? Src.BoundsScale        : Cfg.BoundsScale;
-	C->ForcedLodModel          = Cfg.bReadFromSource ? Src.ForcedLOD          : Cfg.ForcedLOD;
-	C->MinLOD                  = Cfg.bReadFromSource ? Src.MinLOD             : Cfg.MinLOD;
-	C->LDMaxDrawDistance       = Cfg.bReadFromSource ? Src.MaxDrawDistance     : Cfg.MaxDrawDistance;
+	C->CastShadow =
+		Cfg.bReadFromSource ? Src.bCastShadow : Cfg.bCastShadow;
 
-	C->bOverrideLightMapRes    = Cfg.bOverrideLightmapRes;
-	C->OverriddenLightMapRes   = Cfg.OverrideLightmapRes;
+	C->bCastDynamicShadow =
+		Cfg.bReadFromSource
+			? Src.bCastDynamicShadow
+			: Cfg.bCastDynamicShadow;
 
-	C->SetNumCustomDataFloats(Src.CustomDataFloats.Num());
+	C->bCastStaticShadow =
+		Cfg.bReadFromSource
+			? Src.bCastStaticShadow
+			: Cfg.bCastStaticShadow;
+
+	C->bCastContactShadow =
+		Cfg.bReadFromSource
+			? Src.bCastContactShadow
+			: Cfg.bCastContactShadow;
+
+	C->bSelfShadowOnly =
+		Cfg.bReadFromSource
+			? Src.bSelfShadowOnly
+			: Cfg.bSelfShadowOnly;
+
+	C->bReceivesDecals =
+		Cfg.bReadFromSource
+			? Src.bReceivesDecals
+			: Cfg.bReceivesDecals;
+
+	C->bRenderCustomDepth =
+		Cfg.bReadFromSource
+			? Src.bRenderCustomDepth
+			: Cfg.bRenderCustomDepth;
+
+	C->CustomDepthStencilValue =
+		Cfg.bReadFromSource
+			? Src.CustomDepthStencil
+			: Cfg.CustomDepthStencil;
+
+	C->BoundsScale =
+		Cfg.bReadFromSource
+			? Src.BoundsScale
+			: Cfg.BoundsScale;
+
+	C->ForcedLodModel =
+		Cfg.bReadFromSource
+			? Src.ForcedLOD
+			: Cfg.ForcedLOD;
+
+	C->MinLOD =
+		Cfg.bReadFromSource
+			? Src.MinLOD
+			: Cfg.MinLOD;
+
+	C->LDMaxDrawDistance =
+		Cfg.bReadFromSource
+			? Src.MaxDrawDistance
+			: Cfg.MaxDrawDistance;
+
+	C->bOverrideLightMapRes =
+		Cfg.bOverrideLightmapRes;
+
+	C->OverriddenLightMapRes =
+		Cfg.OverrideLightmapRes;
+
 	C->SetMobility(Src.Mobility);
 }
 
@@ -154,6 +202,9 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 {
 	FSMtoISMResult Result;
 
+	FSMtoISMMaterialProxyContext MaterialContext;
+	MaterialContext.Log = &Result.Log;
+
 	UWorld* World = GEditor->GetEditorWorldContext().World();
 	if (!World)
 	{
@@ -162,11 +213,11 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 	}
 
 	UEditorActorSubsystem* Sub = GEditor->GetEditorSubsystem<UEditorActorSubsystem>();
-	TArray<AActor*> Selected   = Sub->GetSelectedLevelActors();
+	TArray<AActor*> Selected = Sub->GetSelectedLevelActors();
 
 	// --- 1. Snapshot ---
 	TArray<UStaticMeshComponent*> Sources;
-	TArray<FSMSnapshot>           Snapshots;
+	TArray<FSMSnapshot> Snapshots;
 
 	for (AActor* Actor : Selected)
 	{
@@ -182,6 +233,7 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 			if (Comp->IsA<UInstancedStaticMeshComponent>()) continue;
 			Sources.Add(Comp);
 			Snapshots.Add(SnapshotActor(Comp));
+			UE_LOG(LogTemp, Warning, TEXT("[SNAPSHOT] %s CPD count=%d"), *Actor->GetActorLabel(), Snapshots.Last().CustomDataFloats.Num());
 		}
 	}
 
@@ -192,9 +244,9 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 	}
 
 	Result.Log.Add(FString::Printf(
-		TEXT("[INFO] %d mesh components found, mode=%s"),
-		Sources.Num(),
-		Cfg.bUseHISM ? TEXT("HISM") : TEXT("ISM")));
+	                               TEXT("[INFO] %d mesh components found, mode=%s"),
+	                               Sources.Num(),
+	                               Cfg.bUseHISM ? TEXT("HISM") : TEXT("ISM")));
 
 	const FScopedTransaction Tx(NSLOCTEXT("SMtoISM", "Convert", "SM to ISM Conversion"));
 
@@ -206,18 +258,33 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 		const FSMSnapshot& Snap = Snapshots[i];
 		if (!Snap.Mesh) continue;
 
+		TArray<UMaterialInterface*> ISMMaterials;
+		ISMMaterials.Reserve(Snap.Materials.Num());
+
+		for (UMaterialInterface* SourceMaterial : Snap.Materials)
+		{
+			UMaterialInterface* ISMMaterial =
+				FSMtoISMMaterialCompatibility::
+				PrepareMaterialForISM(
+				                      SourceMaterial,
+				                      MaterialContext
+				                     );
+
+			ISMMaterials.Add(ISMMaterial);
+		}
+
 		FHISMGroupKey Key;
-		Key.Mesh      = Snap.Mesh;
-		Key.Materials = Snap.Materials;
-		Key.Level     = Sources[i]->GetOwner()->GetLevel();
-		Key.CDONum    = Snap.CustomDataFloats.Num();
+		Key.Mesh = Snap.Mesh;
+		Key.Materials = ISMMaterials;
+		Key.Level = Sources[i]->GetOwner()->GetLevel();
+		Key.CDONum = Snap.CustomDataFloats.Num();
 
 		UInstancedStaticMeshComponent* ISMComp = nullptr;
 		AActor* Container = nullptr;
 
 		if (UInstancedStaticMeshComponent** Existing = MeshMap.Find(Key))
 		{
-			ISMComp   = *Existing;
+			ISMComp = *Existing;
 			Container = ISMComp->GetOwner();
 			if (!Container)
 			{
@@ -251,14 +318,15 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 				// Create HISM component
 				UHierarchicalInstancedStaticMeshComponent* HISM =
 					NewObject<UHierarchicalInstancedStaticMeshComponent>(
-						Container,
-						*FString::Printf(TEXT("HISM_%s"), *Snap.Mesh->GetName()));
+					                                                     Container,
+					                                                     *FString::Printf(TEXT("HISM_%s"), *Snap.Mesh->GetName()));
 
 				HISM->bAutoRebuildTreeOnInstanceChanges = false;
 				HISM->SetMobility(EComponentMobility::Static);
 				HISM->SetupAttachment(Root);
 				Container->AddInstanceComponent(HISM);
-				ApplyProperties(HISM, Snap, Cfg);
+				ApplyProperties(HISM, Snap,ISMMaterials, Cfg);
+				HISM->SetNumCustomDataFloats(Snap.CustomDataFloats.Num());
 				HISM->RegisterComponent();
 				ISMComp = HISM;
 			}
@@ -267,13 +335,14 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 				// Create ISM component
 				UInstancedStaticMeshComponent* ISM =
 					NewObject<UInstancedStaticMeshComponent>(
-						Container,
-						*FString::Printf(TEXT("ISM_%s"), *Snap.Mesh->GetName()));
+					                                         Container,
+					                                         *FString::Printf(TEXT("ISM_%s"), *Snap.Mesh->GetName()));
 
 				ISM->SetMobility(EComponentMobility::Static);
 				ISM->SetupAttachment(Root);
 				Container->AddInstanceComponent(ISM);
-				ApplyProperties(ISM, Snap, Cfg);
+				ApplyProperties(ISM, Snap, ISMMaterials, Cfg);
+				ISM->SetNumCustomDataFloats(Snap.CustomDataFloats.Num());
 				ISM->RegisterComponent();
 				ISMComp = ISM;
 			}
@@ -281,18 +350,59 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 			MeshMap.Add(Key, ISMComp);
 			Result.ISMActorsCreated++;
 			Result.Log.Add(FString::Printf(TEXT("[OK] Created %s_%s"),
-				Cfg.bUseHISM ? TEXT("HISM") : TEXT("ISM"),
-				*Snap.Mesh->GetName()));
+			                               Cfg.bUseHISM ? TEXT("HISM") : TEXT("ISM"),
+			                               *Snap.Mesh->GetName()));
 		}
 
 		// --- 3. Add instance ---
-		const int32 InstanceIdx = ISMComp->AddInstance(Snap.WorldTransform, /*bWorldSpace=*/true);
 
-		if (InstanceIdx != INDEX_NONE)
+		const int32 NumCustomDataFloats = Snap.CustomDataFloats.Num();
+
+		const int32 InstanceIdx =
+			ISMComp->AddInstance(
+			                     Snap.WorldTransform,
+			                     /*bWorldSpace=*/true
+			                    );
+
+		if (InstanceIdx == INDEX_NONE)
 		{
-			for (int32 j = 0; j < Snap.CustomDataFloats.Num(); ++j)
-				ISMComp->SetCustomDataValue(InstanceIdx, j, Snap.CustomDataFloats[j], /*bMarkDirty=*/false);
+			UE_LOG(
+			       LogTemp,
+			       Error,
+			       TEXT("[CPD -> ISM] AddInstance FAILED for %s"),
+			       *Snap.Mesh->GetName()
+			      );
+
+			continue;
 		}
+
+		UE_LOG(
+		       LogTemp,
+		       Warning,
+		       TEXT("[CPD -> ISM] Added Instance=%d NumCPD=%d"),
+		       InstanceIdx,
+		       NumCustomDataFloats
+		      );
+
+		// Set ALL custom data for this instance in one call.
+		if (NumCustomDataFloats > 0)
+		{
+			const bool bSuccess =
+				ISMComp->SetCustomData(
+				                       InstanceIdx,
+				                       MakeArrayView(Snap.CustomDataFloats),
+				                       /*bMarkRenderStateDirty=*/false
+				                      );
+
+			UE_LOG(
+			       LogTemp,
+			       Warning,
+			       TEXT("[CPD -> ISM] SetCustomData Instance=%d Success=%s"),
+			       InstanceIdx,
+			       bSuccess ? TEXT("TRUE") : TEXT("FALSE")
+			      );
+		}
+		ISMComp->MarkRenderStateDirty();
 
 		Result.SourcesProcessed++;
 	}
@@ -342,10 +452,12 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 	World->MarkPackageDirty();
 
 	Result.Log.Add(FString::Printf(
-		TEXT("[DONE] %d actors → %d %s(s)."),
-		Result.SourcesProcessed,
-		Result.ISMActorsCreated,
-		Cfg.bUseHISM ? TEXT("HISM") : TEXT("ISM")));
+	                               TEXT("[DONE] %d actors → %d %s(s)."),
+	                               Result.SourcesProcessed,
+	                               Result.ISMActorsCreated,
+	                               Cfg.bUseHISM ? TEXT("HISM") : TEXT("ISM")));
+
+	if (GEditor) GEditor->RedrawAllViewports();
 
 	return Result;
 }
@@ -374,7 +486,7 @@ FISMtoSMResult FSMtoISMConverter::ConvertBack(const FISMtoSMSettings& Cfg)
 
 	// Get the selected actors in the editor.
 	UEditorActorSubsystem* Sub = GEditor->GetEditorSubsystem<UEditorActorSubsystem>();
-	TArray<AActor*> Selected   = Sub->GetSelectedLevelActors();
+	TArray<AActor*> Selected = Sub->GetSelectedLevelActors();
 
 	// --- 1. Collect ISM/HISM components from the selection ---
 	// UInstancedStaticMeshComponent also includes HISM (inherits from ISM),
@@ -405,10 +517,13 @@ FISMtoSMResult FSMtoISMConverter::ConvertBack(const FISMtoSMSettings& Cfg)
 	{
 		if (!Comp || !Comp->GetStaticMesh()) continue;
 
-		UStaticMesh* Mesh    = Comp->GetStaticMesh();
-		ULevel*      Level   = Comp->GetOwner() ? Comp->GetOwner()->GetLevel() : nullptr;
-		const int32  NumInst = Comp->GetInstanceCount();
-		const int32  NumCPD  = Comp->NumCustomDataFloats;
+		UStaticMesh* Mesh = Comp->GetStaticMesh();
+		ULevel* Level = Comp->GetOwner() ? Comp->GetOwner()->GetLevel() : nullptr;
+		const int32 NumInst = Comp->GetInstanceCount();
+		const int32 NumCPD = Comp->NumCustomDataFloats;
+
+		UE_LOG(LogTemp, Warning, TEXT("[REVERT] Comp=%s NumCPD=%d PerInstanceArraySize=%d"),
+		       *Comp->GetName(), NumCPD, Comp->PerInstanceSMCustomData.Num());
 
 		for (int32 i = 0; i < NumInst; ++i)
 		{
@@ -431,14 +546,8 @@ FISMtoSMResult FSMtoISMConverter::ConvertBack(const FISMtoSMSettings& Cfg)
 
 			// Configure the Static Mesh Component of the new actor.
 			UStaticMeshComponent* SMComp = NewActor->GetStaticMeshComponent();
-			if (Cfg.bForceMovable)
-			{
-				SMComp->SetMobility(EComponentMobility::Movable);
-			}
-			else
-			{
-				SMComp->SetMobility(Comp->Mobility);
-			}
+			if (Cfg.bForceMovable) { SMComp->SetMobility(EComponentMobility::Movable); }
+			else { SMComp->SetMobility(Comp->Mobility); }
 			SMComp->SetStaticMesh(Mesh);
 
 			// Copy materials from the ISM/HISM component.
@@ -446,27 +555,28 @@ FISMtoSMResult FSMtoISMConverter::ConvertBack(const FISMtoSMSettings& Cfg)
 				SMComp->SetMaterial(m, Comp->GetMaterial(m));
 
 			// Copy other properties from the ISM/HISM component.
-			SMComp->CastShadow              = Comp->CastShadow;
-			SMComp->bCastDynamicShadow      = Comp->bCastDynamicShadow;
-			SMComp->bCastStaticShadow       = Comp->bCastStaticShadow;
-			SMComp->bCastContactShadow      = Comp->bCastContactShadow;
-			SMComp->bSelfShadowOnly         = Comp->bSelfShadowOnly;
-			SMComp->bReceivesDecals         = Comp->bReceivesDecals;
-			SMComp->bRenderCustomDepth      = Comp->bRenderCustomDepth;
+			SMComp->CastShadow = Comp->CastShadow;
+			SMComp->bCastDynamicShadow = Comp->bCastDynamicShadow;
+			SMComp->bCastStaticShadow = Comp->bCastStaticShadow;
+			SMComp->bCastContactShadow = Comp->bCastContactShadow;
+			SMComp->bSelfShadowOnly = Comp->bSelfShadowOnly;
+			SMComp->bReceivesDecals = Comp->bReceivesDecals;
+			SMComp->bRenderCustomDepth = Comp->bRenderCustomDepth;
 			SMComp->CustomDepthStencilValue = Comp->CustomDepthStencilValue;
-			SMComp->BoundsScale             = Comp->BoundsScale;
-			SMComp->ForcedLodModel          = Comp->ForcedLodModel;
-			SMComp->MinLOD                  = Comp->MinLOD;
-			SMComp->LDMaxDrawDistance        = Comp->LDMaxDrawDistance;
-			SMComp->bOverrideLightMapRes    = Comp->bOverrideLightMapRes;
-			SMComp->OverriddenLightMapRes   = Comp->OverriddenLightMapRes;
+			SMComp->BoundsScale = Comp->BoundsScale;
+			SMComp->ForcedLodModel = Comp->ForcedLodModel;
+			SMComp->MinLOD = Comp->MinLOD;
+			SMComp->LDMaxDrawDistance = Comp->LDMaxDrawDistance;
+			SMComp->bOverrideLightMapRes = Comp->bOverrideLightMapRes;
+			SMComp->OverriddenLightMapRes = Comp->OverriddenLightMapRes;
 
 			// Restore per-instance custom data as custom primitive data on the new component.
 			for (int32 j = 0; j < NumCPD; ++j)
 			{
 				const int32 FlatIndex = i * NumCPD + j;
 				const float Value = Comp->PerInstanceSMCustomData.IsValidIndex(FlatIndex)
-					? Comp->PerInstanceSMCustomData[FlatIndex] : 0.f;
+					                    ? Comp->PerInstanceSMCustomData[FlatIndex]
+					                    : 0.f;
 				SMComp->SetCustomPrimitiveDataFloat(j, Value);
 			}
 
@@ -497,8 +607,8 @@ FISMtoSMResult FSMtoISMConverter::ConvertBack(const FISMtoSMSettings& Cfg)
 
 	// Log the results of the conversion process.
 	Result.Log.Add(FString::Printf(
-		TEXT("[DONE] %d instance(s) -> %d Static Mesh Actor(s)."),
-		Result.InstancesRestored, Result.ActorsCreated));
+	                               TEXT("[DONE] %d instance(s) -> %d Static Mesh Actor(s)."),
+	                               Result.InstancesRestored, Result.ActorsCreated));
 
 	return Result;
 }
@@ -525,8 +635,8 @@ void FSMtoISMConverter::EnsureMaterialSupportsInstancing(UMaterialInterface* Mat
 		{
 			// Log a warning about the material configuration.
 			OutResult.Log.Add(FString::Printf(
-				TEXT("[WARN] '%s' non ha 'Used with Instanced Static Meshes' - rischia di renderizzare sbagliato sull'ISM/HISM."),
-				*Base->GetName()));
+			                                  TEXT("[WARN] '%s' non ha 'Used with Instanced Static Meshes' - rischia di renderizzare sbagliato sull'ISM/HISM."),
+			                                  *Base->GetName()));
 
 			// Enable the 'Used with Instanced Static Meshes' property.
 			Base->bUsedWithInstancedStaticMeshes = true;
@@ -536,4 +646,3 @@ void FSMtoISMConverter::EnsureMaterialSupportsInstancing(UMaterialInterface* Mat
 		}
 	}
 }
-
