@@ -1,3 +1,5 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
 #include "SMtoISMConverter.h"
 
 #include "Editor.h"
@@ -9,7 +11,12 @@
 #include "Engine/StaticMeshActor.h"
 #include "GameFramework/Actor.h"
 #include "ScopedTransaction.h"
-#include "SMtoISMMaterialCompatibility.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialInterface.h"
+#include "Materials/MaterialExpression.h"
+#include "Materials/MaterialExpressionPerInstanceCustomData.h"
+#include "SMConvertedCPDComponent.h"
+
 
 // ---------------------------------------------------------------------------
 // Internal Snapshot
@@ -39,6 +46,20 @@ struct FSMSnapshot
 	bool bOverrideLightmapRes = false;                              /**< Whether to override the lightmap resolution. */
 	EComponentMobility::Type Mobility = EComponentMobility::Static; /**< Mobility type of the component. */
 	TArray<float> CustomDataFloats;                                 /**< Array of custom data floats for the component. */
+	/*
+	 * CPD indices read through Per Instance Custom Data.
+	 *
+	 * These values are written with SetCustomData().
+	 */
+	TArray<int32> PerInstanceDataIndices;
+
+	/*
+	 * CPD indices that cannot safely be represented per instance.
+	 *
+	 * These values are written as component-level CPD and are also
+	 * part of the ISM/HISM grouping key.
+	 */
+	TArray<int32> ComponentDataIndices;
 };
 
 // ---------------------------------------------------------------------------
@@ -55,7 +76,9 @@ static FSMSnapshot SnapshotActor(UStaticMeshComponent* C)
 	S.Mesh = C->GetStaticMesh();
 
 	const int32 N = C->GetNumMaterials();
+
 	S.Materials.Reserve(N);
+
 	for (int32 i = 0; i < N; ++i)
 		S.Materials.Add(C->GetMaterial(i));
 
@@ -74,13 +97,33 @@ static FSMSnapshot SnapshotActor(UStaticMeshComponent* C)
 	S.OverrideLightmapRes = C->OverriddenLightMapRes;
 	S.bOverrideLightmapRes = C->bOverrideLightMapRes;
 	S.Mobility = C->Mobility;
+	/*
+	* Read original CPD.
+	*/
+	const FCustomPrimitiveData& CPD =
+		C->GetCustomPrimitiveData();
 
-	const FCustomPrimitiveData& CPD = C->GetCustomPrimitiveData();
-	const int32 NumCPD = CPD.Data.Num();
+	const int32 NumCPD =
+		CPD.Data.Num();
+
 	S.CustomDataFloats.SetNum(NumCPD);
-	for (int32 i = 0; i < NumCPD; ++i)
-		S.CustomDataFloats[i] = CPD.Data[i];
 
+	for (int32 i = 0; i < NumCPD; ++i)
+	{
+		S.CustomDataFloats[i] =
+			CPD.Data[i];
+	}
+
+	/*
+	 * Determine how every CPD index must be represented
+	 * after conversion.
+	 */
+	FSMtoISMConverter::DetermineCPDDataModes(
+	                      C,
+	                      NumCPD,
+	                      S.PerInstanceDataIndices,
+	                      S.ComponentDataIndices
+	                     );
 	return S;
 }
 
@@ -95,12 +138,12 @@ static FSMSnapshot SnapshotActor(UStaticMeshComponent* C)
 static void ApplyProperties(
 	UInstancedStaticMeshComponent* C,
 	const FSMSnapshot& Src,
-	const TArray<UMaterialInterface*>& Materials,
 	const FSMtoISMSettings& Cfg)
 {
 	C->SetStaticMesh(Src.Mesh);
 
-	for (int32 i = 0; i < Materials.Num(); ++i) { C->SetMaterial(i, Materials[i]); }
+	for (int32 i = 0; i < Src.Materials.Num(); ++i)
+		C->SetMaterial(i, Src.Materials[i]);
 
 	C->CastShadow =
 		Cfg.bReadFromSource ? Src.bCastShadow : Cfg.bCastShadow;
@@ -182,28 +225,47 @@ FORCEINLINE uint32 GetTypeHash(const FHISMGroupKey& K)
 	Hash = HashCombine(Hash, ::GetTypeHash(K.Level));
 	Hash = HashCombine(Hash, ::GetTypeHash(K.CDONum));
 
-	// Commutative sum: material order does not matter
+	/*
+		 * Material hash.
+		 */
 	uint32 MatHash = 0;
-	for (UMaterialInterface* Mat : K.Materials)
-		MatHash += ::GetTypeHash(Mat);
-	Hash = HashCombine(Hash, MatHash);
 
+	for (UMaterialInterface* Mat : K.Materials)
+	{
+		MatHash +=
+			::GetTypeHash(Mat);
+	}
+
+	Hash =
+		HashCombine(
+		            Hash,
+		            MatHash
+		           );
+
+	/*
+	 * Component-level CPD values.
+	 */
+	for (const float Value : K.ComponentLevelValues)
+	{
+		Hash =
+			HashCombine(
+			            Hash,
+			            ::GetTypeHash(Value)
+			           );
+	}
 	return Hash;
 }
 
-// ---------------------------------------------------------------------------
-/**
- * Converts Static Mesh Components to Instanced Static Mesh Components.
- *
- * @param Cfg The settings for the conversion process.
- * @return The result of the conversion process.
- */
+// ============================================================================
+// Sostituiscono interamente Convert() e ConvertBack() in SMtoISMConverter.cpp
+// Richiede l'header/cpp aggiornati di SMConvertedCPDComponent.
+// Le parti invariate rispetto alla versione attuale sono lasciate identiche;
+// i blocchi NUOVI sono marcati con "// >>> NUOVO".
+// ============================================================================
+
 FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 {
 	FSMtoISMResult Result;
-
-	FSMtoISMMaterialProxyContext MaterialContext;
-	MaterialContext.Log = &Result.Log;
 
 	UWorld* World = GEditor->GetEditorWorldContext().World();
 	if (!World)
@@ -213,6 +275,11 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 	}
 
 	UEditorActorSubsystem* Sub = GEditor->GetEditorSubsystem<UEditorActorSubsystem>();
+	if (!Sub)
+	{
+		Result.Log.Add(TEXT("[ERR] EditorActorSubsystem not available."));
+		return Result;
+	}
 	TArray<AActor*> Selected = Sub->GetSelectedLevelActors();
 
 	// --- 1. Snapshot ---
@@ -237,6 +304,47 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 		}
 	}
 
+	TSet<int32> RequiredCPDIndices;
+
+	for (const FSMSnapshot& Snapshot : Snapshots)
+	{
+		for (int32 Index = 0;
+		     Index < Snapshot.CustomDataFloats.Num();
+		     ++Index) { RequiredCPDIndices.Add(Index); }
+	}
+
+	TArray<FString> MaterialWarnings;
+
+	const bool bMaterialsValid =
+		ValidateSelectedMaterials(
+		                          Selected,
+		                          RequiredCPDIndices,
+		                          MaterialWarnings
+		                         );
+
+	if (!bMaterialsValid)
+	{
+		UE_LOG(
+		       LogTemp,
+		       Warning,
+		       TEXT(
+			       "[SMConverter] Material validation completed "
+			       "with %d warning(s). Conversion will continue."
+		       ),
+		       MaterialWarnings.Num()
+		      );
+
+		for (const FString& Warning : MaterialWarnings)
+		{
+			Result.Log.Add(
+			               FString::Printf(
+			                               TEXT("[WARN] %s"),
+			                               *Warning
+			                              )
+			              );
+		}
+	}
+
 	if (Sources.IsEmpty())
 	{
 		Result.Log.Add(TEXT("[WARN] No valid StaticMeshComponents in selection."));
@@ -258,26 +366,29 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 		const FSMSnapshot& Snap = Snapshots[i];
 		if (!Snap.Mesh) continue;
 
-		TArray<UMaterialInterface*> ISMMaterials;
-		ISMMaterials.Reserve(Snap.Materials.Num());
-
-		for (UMaterialInterface* SourceMaterial : Snap.Materials)
-		{
-			UMaterialInterface* ISMMaterial =
-				FSMtoISMMaterialCompatibility::
-				PrepareMaterialForISM(
-				                      SourceMaterial,
-				                      MaterialContext
-				                     );
-
-			ISMMaterials.Add(ISMMaterial);
-		}
-
 		FHISMGroupKey Key;
+
 		Key.Mesh = Snap.Mesh;
-		Key.Materials = ISMMaterials;
+		Key.Materials = Snap.Materials;
 		Key.Level = Sources[i]->GetOwner()->GetLevel();
+
+		/*
+		 * Keep the ORIGINAL CPD count because PerInstanceCustomData
+		 * uses the original DataIndex.
+		 */
 		Key.CDONum = Snap.CustomDataFloats.Num();
+
+		/*
+		 * Component-level values become part of the grouping key.
+		 */
+		for (const int32 CPDIndex : Snap.ComponentDataIndices)
+		{
+			if (Snap.CustomDataFloats.IsValidIndex(CPDIndex))
+			{
+				Key.ComponentLevelValues.Add(Snap.CustomDataFloats[CPDIndex]);
+			}
+			else { Key.ComponentLevelValues.Add(0.f); }
+		}
 
 		UInstancedStaticMeshComponent* ISMComp = nullptr;
 		AActor* Container = nullptr;
@@ -305,17 +416,26 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 				continue;
 			}
 
-			Container->SetActorLabel(FString::Printf(TEXT("ISM_%s"), *Snap.Mesh->GetName()));
+			Container->SetActorLabel(
+				Cfg.bUseHISM
+					? FString::Printf(TEXT("HISM_%s"), *Snap.Mesh->GetName())
+					: FString::Printf(TEXT("ISM_%s"), *Snap.Mesh->GetName())
+			);
+			
+			for (UMaterialInterface* Mat : Snap.Materials)
+			{
+				EnsureMaterialSupportsInstancing(Mat, Result);
+			}
 
 			// Create root component
 			USceneComponent* Root = NewObject<USceneComponent>(Container, TEXT("Root"));
 			Root->Mobility = EComponentMobility::Static;
-			Root->RegisterComponent();
 			Container->SetRootComponent(Root);
+			Root->RegisterComponent();
+			Container->AddInstanceComponent(Root);
 
 			if (Cfg.bUseHISM)
 			{
-				// Create HISM component
 				UHierarchicalInstancedStaticMeshComponent* HISM =
 					NewObject<UHierarchicalInstancedStaticMeshComponent>(
 					                                                     Container,
@@ -324,15 +444,14 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 				HISM->bAutoRebuildTreeOnInstanceChanges = false;
 				HISM->SetMobility(EComponentMobility::Static);
 				HISM->SetupAttachment(Root);
-				Container->AddInstanceComponent(HISM);
-				ApplyProperties(HISM, Snap,ISMMaterials, Cfg);
+				ApplyProperties(HISM, Snap, Cfg);
 				HISM->SetNumCustomDataFloats(Snap.CustomDataFloats.Num());
 				HISM->RegisterComponent();
+				Container->AddInstanceComponent(HISM);
 				ISMComp = HISM;
 			}
 			else
 			{
-				// Create ISM component
 				UInstancedStaticMeshComponent* ISM =
 					NewObject<UInstancedStaticMeshComponent>(
 					                                         Container,
@@ -340,18 +459,85 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 
 				ISM->SetMobility(EComponentMobility::Static);
 				ISM->SetupAttachment(Root);
-				Container->AddInstanceComponent(ISM);
-				ApplyProperties(ISM, Snap, ISMMaterials, Cfg);
+				ApplyProperties(ISM, Snap, Cfg);
 				ISM->SetNumCustomDataFloats(Snap.CustomDataFloats.Num());
 				ISM->RegisterComponent();
+				Container->AddInstanceComponent(ISM);
 				ISMComp = ISM;
 			}
 
 			MeshMap.Add(Key, ISMComp);
+
 			Result.ISMActorsCreated++;
-			Result.Log.Add(FString::Printf(TEXT("[OK] Created %s_%s"),
-			                               Cfg.bUseHISM ? TEXT("HISM") : TEXT("ISM"),
-			                               *Snap.Mesh->GetName()));
+
+			Result.Log.Add(
+			               FString::Printf(
+			                               TEXT("[OK] Created %s_%s"),
+			                               Cfg.bUseHISM
+				                               ? TEXT("HISM")
+				                               : TEXT("ISM"),
+			                               *Snap.Mesh->GetName()
+			                              )
+			              );
+
+			/*
+			 * Set component-level CPD once (visible immediately in this
+			 * editor session - see note below on why that's not enough).
+			 */
+			for (const int32 CPDIndex : Snap.ComponentDataIndices)
+			{
+				if (!Snap.CustomDataFloats.IsValidIndex(CPDIndex)) { continue; }
+
+				const float Value = Snap.CustomDataFloats[CPDIndex];
+
+				ISMComp->SetCustomPrimitiveDataFloat(CPDIndex, Value);
+
+				UE_LOG(
+				       LogTemp,
+				       Warning,
+				       TEXT("[CPD -> ISM] Component CPD[%d] = %f"),
+				       CPDIndex,
+				       Value
+				      );
+			}
+
+			// >>> NUOVO -----------------------------------------------------
+			// SetCustomPrimitiveDataFloat() above is RUNTIME-ONLY and does
+			// not serialize (Epic's own docs). Without this, the values
+			// look correct right now in the viewport but are lost the
+			// moment this level is saved & reopened, entered in PIE, or
+			// packaged - exactly the same failure mode ConvertBack had.
+			// Attach the helper component so there is one persistent,
+			// editable source of truth, applied on every (re)registration.
+			// Only attached when there is actually something to persist:
+			// materials that read every CPD index via Per Instance Custom
+			// Data don't need it, that data already lives in
+			// PerInstanceSMCustomData, which IS serialized normally.
+			if (Key.ComponentLevelValues.Num() > 0)
+			{
+				TArray<float> BakedValues;
+				BakedValues.SetNumZeroed(Snap.CustomDataFloats.Num());
+
+				for (int32 k = 0; k < Snap.ComponentDataIndices.Num(); ++k)
+				{
+					const int32 CPDIndex = Snap.ComponentDataIndices[k];
+					if (BakedValues.IsValidIndex(CPDIndex))
+					{
+						BakedValues[CPDIndex] = Key.ComponentLevelValues[k];
+					}
+				}
+
+				USMConvertedCPDComponent* CPDComp =
+					NewObject<USMConvertedCPDComponent>(Container, TEXT("BakedComponentCPD"));
+				CPDComp->BakedCustomPrimitiveData = BakedValues;
+				CPDComp->RegisterComponent();
+				Container->AddInstanceComponent(CPDComp);
+
+				Result.Log.Add(FString::Printf(
+					TEXT("[OK] Attached persistent CPD holder to %s (%d component-level value(s))."),
+					*Container->GetActorLabel(), Key.ComponentLevelValues.Num()));
+			}
+			// <<< FINE NUOVO --------------------------------------------------
 		}
 
 		// --- 3. Add instance ---
@@ -384,22 +570,37 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 		       NumCustomDataFloats
 		      );
 
-		// Set ALL custom data for this instance in one call.
-		if (NumCustomDataFloats > 0)
+		if (Snap.CustomDataFloats.Num() > 0)
 		{
+			TArray<float> PerInstanceValues;
+
+			PerInstanceValues.SetNumZeroed(Snap.CustomDataFloats.Num());
+
+			for (const int32 CPDIndex : Snap.PerInstanceDataIndices)
+			{
+				if (!Snap.CustomDataFloats.IsValidIndex(CPDIndex)) { continue; }
+
+				PerInstanceValues[CPDIndex] = Snap.CustomDataFloats[CPDIndex];
+			}
+
 			const bool bSuccess =
 				ISMComp->SetCustomData(
 				                       InstanceIdx,
-				                       MakeArrayView(Snap.CustomDataFloats),
+				                       MakeArrayView(PerInstanceValues),
 				                       /*bMarkRenderStateDirty=*/false
 				                      );
 
 			UE_LOG(
 			       LogTemp,
 			       Warning,
-			       TEXT("[CPD -> ISM] SetCustomData Instance=%d Success=%s"),
+			       TEXT(
+				       "[CPD -> ISM] SetCustomData "
+				       "Instance=%d Success=%s "
+				       "PerInstanceIndices=%d"
+			       ),
 			       InstanceIdx,
-			       bSuccess ? TEXT("TRUE") : TEXT("FALSE")
+			       bSuccess ? TEXT("TRUE") : TEXT("FALSE"),
+			       Snap.PerInstanceDataIndices.Num()
 			      );
 		}
 		ISMComp->MarkRenderStateDirty();
@@ -465,18 +666,10 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 // ---------------------------------------------------------------------------
 // Convert Back from ISM/HISM to a StaticMeshActor
 // ---------------------------------------------------------------------------
-/**
- * Converts Instanced Static Mesh (ISM) or Hierarchical Instanced Static Mesh (HISM)
- * components back into individual Static Mesh Actors.
- *
- * @param Cfg The settings for the conversion process.
- * @return The result of the conversion process, including logs and statistics.
- */
 FISMtoSMResult FSMtoISMConverter::ConvertBack(const FISMtoSMSettings& Cfg)
 {
 	FISMtoSMResult Result;
 
-	// Retrieve the editor world context.
 	UWorld* World = GEditor->GetEditorWorldContext().World();
 	if (!World)
 	{
@@ -484,13 +677,19 @@ FISMtoSMResult FSMtoISMConverter::ConvertBack(const FISMtoSMSettings& Cfg)
 		return Result;
 	}
 
-	// Get the selected actors in the editor.
 	UEditorActorSubsystem* Sub = GEditor->GetEditorSubsystem<UEditorActorSubsystem>();
+	if (!Sub)
+	{
+		Result.Log.Add(TEXT("[ERR] EditorActorSubsystem not available."));
+		return Result;
+	}
 	TArray<AActor*> Selected = Sub->GetSelectedLevelActors();
+	if (Selected.Num() == 0)
+	{
+		Result.Log.Add(TEXT("[WARN] No actors selected."));
+		return Result;
+	}
 
-	// --- 1. Collect ISM/HISM components from the selection ---
-	// UInstancedStaticMeshComponent also includes HISM (inherits from ISM),
-	// so a single GetComponents call is sufficient for both cases.
 	TArray<UInstancedStaticMeshComponent*> SourceComps;
 	for (AActor* Actor : Selected)
 	{
@@ -500,19 +699,16 @@ FISMtoSMResult FSMtoISMConverter::ConvertBack(const FISMtoSMSettings& Cfg)
 		SourceComps.Append(Comps);
 	}
 
-	// If no ISM/HISM components are found, log a warning and return.
 	if (SourceComps.IsEmpty())
 	{
 		Result.Log.Add(TEXT("[WARN] No ISM/HISM component in selection."));
 		return Result;
 	}
 
-	// Begin a scoped transaction for undo/redo support.
 	const FScopedTransaction Tx(NSLOCTEXT("SMtoISM", "Revert", "ISM to Static Mesh Revert"));
 
 	TSet<AActor*> ContainersToCheck;
 
-	// --- 2. For each instance, spawn a movable AStaticMeshActor with the same properties ---
 	for (UInstancedStaticMeshComponent* Comp : SourceComps)
 	{
 		if (!Comp || !Comp->GetStaticMesh()) continue;
@@ -522,15 +718,21 @@ FISMtoSMResult FSMtoISMConverter::ConvertBack(const FISMtoSMSettings& Cfg)
 		const int32 NumInst = Comp->GetInstanceCount();
 		const int32 NumCPD = Comp->NumCustomDataFloats;
 
-		UE_LOG(LogTemp, Warning, TEXT("[REVERT] Comp=%s NumCPD=%d PerInstanceArraySize=%d"),
-		       *Comp->GetName(), NumCPD, Comp->PerInstanceSMCustomData.Num());
+		TArray<int32> PerInstanceIndices;
+		TArray<int32> ComponentIndices;
+		DetermineCPDDataModes(Comp, NumCPD, PerInstanceIndices, ComponentIndices);
+
+		TSet<int32> ComponentIndexSet(ComponentIndices);
+		const FCustomPrimitiveData& CompCPD = Comp->GetCustomPrimitiveData();
+
+		UE_LOG(LogTemp, Warning, TEXT("[REVERT] Comp=%s NumCPD=%d PerInstanceArraySize=%d PerInstanceIdx=%d ComponentIdx=%d"),
+		       *Comp->GetName(), NumCPD, Comp->PerInstanceSMCustomData.Num(), PerInstanceIndices.Num(), ComponentIndices.Num());
 
 		for (int32 i = 0; i < NumInst; ++i)
 		{
 			FTransform InstTransform;
 			if (!Comp->GetInstanceTransform(i, InstTransform, /*bWorldSpace=*/true)) continue;
 
-			// Spawn a new Static Mesh Actor for each instance.
 			FActorSpawnParameters P;
 			P.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 			P.OverrideLevel = Level;
@@ -541,20 +743,16 @@ FISMtoSMResult FSMtoISMConverter::ConvertBack(const FISMtoSMSettings& Cfg)
 				continue;
 			}
 
-			// Set the actor label for the new Static Mesh Actor.
 			NewActor->SetActorLabel(FString::Printf(TEXT("%s_%d"), *Mesh->GetName(), i));
 
-			// Configure the Static Mesh Component of the new actor.
 			UStaticMeshComponent* SMComp = NewActor->GetStaticMeshComponent();
 			if (Cfg.bForceMovable) { SMComp->SetMobility(EComponentMobility::Movable); }
 			else { SMComp->SetMobility(Comp->Mobility); }
 			SMComp->SetStaticMesh(Mesh);
 
-			// Copy materials from the ISM/HISM component.
 			for (int32 m = 0; m < Comp->GetNumMaterials(); ++m)
 				SMComp->SetMaterial(m, Comp->GetMaterial(m));
 
-			// Copy other properties from the ISM/HISM component.
 			SMComp->CastShadow = Comp->CastShadow;
 			SMComp->bCastDynamicShadow = Comp->bCastDynamicShadow;
 			SMComp->bCastStaticShadow = Comp->bCastStaticShadow;
@@ -570,26 +768,54 @@ FISMtoSMResult FSMtoISMConverter::ConvertBack(const FISMtoSMSettings& Cfg)
 			SMComp->bOverrideLightMapRes = Comp->bOverrideLightMapRes;
 			SMComp->OverriddenLightMapRes = Comp->OverriddenLightMapRes;
 
-			// Restore per-instance custom data as custom primitive data on the new component.
+			// Component-level indices come from the ISM/HISM component's own
+			// CustomPrimitiveData (shared by the whole group), per-instance
+			// indices come from that specific instance's slot.
+			TArray<float> BakedValues;
+			BakedValues.SetNumZeroed(NumCPD);
+
 			for (int32 j = 0; j < NumCPD; ++j)
 			{
-				const int32 FlatIndex = i * NumCPD + j;
-				const float Value = Comp->PerInstanceSMCustomData.IsValidIndex(FlatIndex)
-					                    ? Comp->PerInstanceSMCustomData[FlatIndex]
-					                    : 0.f;
-				SMComp->SetCustomPrimitiveDataFloat(j, Value);
+				if (ComponentIndexSet.Contains(j))
+				{
+					BakedValues[j] = CompCPD.Data.IsValidIndex(j) ? CompCPD.Data[j] : 0.f;
+				}
+				else
+				{
+					const int32 FlatIndex = i * NumCPD + j;
+					BakedValues[j] = Comp->PerInstanceSMCustomData.IsValidIndex(FlatIndex)
+						                  ? Comp->PerInstanceSMCustomData[FlatIndex]
+						                  : 0.f;
+				}
 			}
+
+			// >>> NUOVO -----------------------------------------------------
+			// SetCustomPrimitiveDataFloat() is RUNTIME-ONLY and does not
+			// serialize, so the values are handed ENTIRELY to the helper
+			// component below - it is now the single source of truth and
+			// applies them itself (OnRegister), both right now in this
+			// editor session and on every future load/PIE/package. No
+			// separate manual SetCustomPrimitiveDataFloat() call here
+			// anymore: having two code paths write the same values was
+			// exactly what made them fall out of sync when edited later.
+			if (NumCPD > 0)
+			{
+				USMConvertedCPDComponent* CPDComp =
+					NewObject<USMConvertedCPDComponent>(NewActor, TEXT("BakedCPD"));
+				CPDComp->BakedCustomPrimitiveData = BakedValues;
+				CPDComp->RegisterComponent();
+				NewActor->AddInstanceComponent(CPDComp);
+			}
+			// <<< FINE NUOVO --------------------------------------------------
 
 			Result.ActorsCreated++;
 			Result.InstancesRestored++;
 		}
 
-		// Add the container actor to the set for potential deletion.
 		if (AActor* Container = Comp->GetOwner())
 			ContainersToCheck.Add(Container);
 	}
 
-	// --- 3. Delete the source ISM/HISM container actors ---
 	if (Cfg.bDeleteSourceComponent)
 	{
 		for (AActor* Container : ContainersToCheck)
@@ -601,11 +827,9 @@ FISMtoSMResult FSMtoISMConverter::ConvertBack(const FISMtoSMSettings& Cfg)
 		Result.Log.Add(FString::Printf(TEXT("[OK] Destroyed %d ISM/HISM container actor(s)."), ContainersToCheck.Num()));
 	}
 
-	// Deselect all actors and mark the world package as dirty.
 	Sub->SelectNothing();
 	World->MarkPackageDirty();
 
-	// Log the results of the conversion process.
 	Result.Log.Add(FString::Printf(
 	                               TEXT("[DONE] %d instance(s) -> %d Static Mesh Actor(s)."),
 	                               Result.InstancesRestored, Result.ActorsCreated));
@@ -644,5 +868,389 @@ void FSMtoISMConverter::EnsureMaterialSupportsInstancing(UMaterialInterface* Mat
 			// Notify the editor about the material change.
 			Base->PostEditChange();
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Material Per Instance Custom Data validation
+// ---------------------------------------------------------------------------
+
+bool FSMtoISMConverter::MaterialHasPerInstanceCustomData(
+	UMaterialInterface* Material,
+	TArray<int32>* OutDataIndices)
+{
+	if (OutDataIndices) { OutDataIndices->Reset(); }
+
+	if (!Material) { return false; }
+
+	UMaterial* BaseMaterial = Material->GetMaterial();
+
+	if (!BaseMaterial) { return false; }
+
+	bool bFound = false;
+
+	for (UMaterialExpression* Expression : BaseMaterial->GetExpressions())
+	{
+		if (!Expression) { continue; }
+
+		if (const UMaterialExpressionPerInstanceCustomData* CustomData =
+			Cast<UMaterialExpressionPerInstanceCustomData>(Expression))
+		{
+			bFound = true;
+
+			if (OutDataIndices)
+			{
+				OutDataIndices->AddUnique(
+				                          static_cast<int32>(CustomData->DataIndex)
+				                         );
+			}
+
+			continue;
+		}
+
+		if (const UMaterialExpressionPerInstanceCustomData3Vector* CustomData3 =
+			Cast<UMaterialExpressionPerInstanceCustomData3Vector>(Expression))
+		{
+			bFound = true;
+
+			if (OutDataIndices)
+			{
+				OutDataIndices->AddUnique(
+				                          static_cast<int32>(CustomData3->DataIndex)
+				                         );
+			}
+		}
+	}
+
+	return bFound;
+}
+
+// ---------------------------------------------------------------------------
+// Validate a material against the CPD indices that will actually be copied
+// ---------------------------------------------------------------------------
+
+bool FSMtoISMConverter::ValidateMaterialCustomData(
+	UMaterialInterface* Material,
+	const TSet<int32>& RequiredIndices,
+	TArray<int32>& OutMissingIndices)
+{
+	OutMissingIndices.Reset();
+
+	if (!Material) { return true; }
+
+	if (RequiredIndices.Num() == 0) { return true; }
+
+	TArray<int32> MaterialDataIndices;
+
+	MaterialHasPerInstanceCustomData(
+	                                 Material,
+	                                 &MaterialDataIndices
+	                                );
+
+	TSet<int32> MaterialIndices;
+
+	for (const int32 Index : MaterialDataIndices) { MaterialIndices.Add(Index); }
+
+	bool bValid = true;
+
+	for (const int32 RequiredIndex : RequiredIndices)
+	{
+		if (!MaterialIndices.Contains(RequiredIndex))
+		{
+			OutMissingIndices.Add(RequiredIndex);
+			bValid = false;
+		}
+	}
+
+	OutMissingIndices.Sort();
+
+	return bValid;
+}
+
+// ---------------------------------------------------------------------------
+// Validate all materials used by an Actor
+// ---------------------------------------------------------------------------
+
+bool FSMtoISMConverter::ValidateActorMaterials(
+	AActor* Actor,
+	const TSet<int32>& RequiredIndices,
+	TArray<FString>& OutWarnings)
+{
+	if (!Actor) { return true; }
+
+	if (RequiredIndices.Num() == 0) { return true; }
+
+	TArray<UStaticMeshComponent*> Components;
+
+	Actor->GetComponents<UStaticMeshComponent>(Components);
+
+	bool bAllValid = true;
+
+	UE_LOG(
+	       LogTemp,
+	       Warning,
+	       TEXT(
+		       "[SMConverter] VALIDATING Actor='%s' Components=%d RequiredCPD=%d"
+	       ),
+	       *Actor->GetActorLabel(),
+	       Components.Num(),
+	       RequiredIndices.Num()
+	      );
+
+	for (UStaticMeshComponent* Component : Components)
+	{
+		if (!Component) { continue; }
+
+		if (Component->IsA<UInstancedStaticMeshComponent>()) { continue; }
+
+		if (!Component->GetStaticMesh()) { continue; }
+
+		UE_LOG(
+		       LogTemp,
+		       Warning,
+		       TEXT(
+			       "[SMConverter] Checking Component='%s' Materials=%d"
+		       ),
+		       *Component->GetName(),
+		       Component->GetNumMaterials()
+		      );
+
+		for (int32 MaterialIndex = 0;
+		     MaterialIndex < Component->GetNumMaterials();
+		     ++MaterialIndex)
+		{
+			UMaterialInterface* Material =
+				Component->GetMaterial(MaterialIndex);
+
+			if (!Material)
+			{
+				UE_LOG(
+				       LogTemp,
+				       Warning,
+				       TEXT(
+					       "[SMConverter] Component='%s' Material[%d] = NULL"
+				       ),
+				       *Component->GetName(),
+				       MaterialIndex
+				      );
+
+				continue;
+			}
+
+			TArray<int32> MissingIndices;
+
+			const bool bValid =
+				ValidateMaterialCustomData(
+				                           Material,
+				                           RequiredIndices,
+				                           MissingIndices
+				                          );
+
+			if (bValid)
+			{
+				UE_LOG(
+				       LogTemp,
+				       Warning,
+				       TEXT(
+					       "[SMConverter] OK Actor='%s' Material='%s'"
+				       ),
+				       *Actor->GetActorLabel(),
+				       *Material->GetName()
+				      );
+
+				continue;
+			}
+
+			bAllValid = false;
+
+			FString MissingString;
+
+			for (int32 i = 0;
+			     i < MissingIndices.Num();
+			     ++i)
+			{
+				if (i > 0) { MissingString += TEXT(", "); }
+
+				MissingString +=
+					FString::FromInt(MissingIndices[i]);
+			}
+
+			const FString Warning = FString::Printf(
+			                                        TEXT(
+			                                             "[SMConverter] WARNING: "
+			                                             "Actor='%s' "
+			                                             "Component='%s' "
+			                                             "Material='%s' "
+			                                             "is missing Per Instance Custom Data "
+			                                             "for CPD indices [%s]"
+			                                            ),
+			                                        *Actor->GetActorLabel(),
+			                                        *Component->GetName(),
+			                                        *Material->GetName(),
+			                                        *MissingString
+			                                       );
+
+			OutWarnings.Add(Warning);
+
+			UE_LOG(
+			       LogTemp,
+			       Warning,
+			       TEXT("%s"),
+			       *Warning
+			      );
+		}
+	}
+
+	return bAllValid;
+}
+
+// ---------------------------------------------------------------------------
+// Validate all selected Actors
+// ---------------------------------------------------------------------------
+
+bool FSMtoISMConverter::ValidateSelectedMaterials(
+	const TArray<AActor*>& Actors,
+	const TSet<int32>& RequiredIndices,
+	TArray<FString>& OutWarnings)
+{
+	OutWarnings.Reset();
+
+	UE_LOG(
+	       LogTemp,
+	       Warning,
+	       TEXT(
+		       "[SMConverter] ===== MATERIAL VALIDATION ====="
+	       )
+	      );
+
+	UE_LOG(
+	       LogTemp,
+	       Warning,
+	       TEXT(
+		       "[SMConverter] Actors=%d RequiredCPDIndices=%d"
+	       ),
+	       Actors.Num(),
+	       RequiredIndices.Num()
+	      );
+
+	for (const int32 Index : RequiredIndices)
+	{
+		UE_LOG(
+		       LogTemp,
+		       Warning,
+		       TEXT(
+			       "[SMConverter] Required CPD Index=%d"
+		       ),
+		       Index
+		      );
+	}
+
+	if (RequiredIndices.Num() == 0)
+	{
+		UE_LOG(
+		       LogTemp,
+		       Warning,
+		       TEXT(
+			       "[SMConverter] No CPD indices to validate."
+		       )
+		      );
+
+		return true;
+	}
+
+	bool bAllValid = true;
+
+	for (AActor* Actor : Actors)
+	{
+		if (!Actor) { continue; }
+
+		if (!ValidateActorMaterials(
+		                            Actor,
+		                            RequiredIndices,
+		                            OutWarnings)) { bAllValid = false; }
+	}
+
+	UE_LOG(
+	       LogTemp,
+	       Warning,
+	       TEXT(
+		       "[SMConverter] ===== MATERIAL VALIDATION END ===== "
+		       "Valid=%s Warnings=%d"
+	       ),
+	       bAllValid ? TEXT("TRUE") : TEXT("FALSE"),
+	       OutWarnings.Num()
+	      );
+
+	return bAllValid;
+}
+
+void FSMtoISMConverter::DetermineCPDDataModes(UStaticMeshComponent* Component, int32 NumCPD, TArray<int32>& OutPerInstanceIndices,
+                                              TArray<int32>& OutComponentIndices)
+{
+	OutPerInstanceIndices.Reset();
+	OutComponentIndices.Reset();
+
+	if (!Component || NumCPD <= 0) { return; }
+
+	/*
+	 * Start assuming that every CPD index is component-level.
+	 *
+	 * An index becomes PerInstance only if ALL materials contain
+	 * a Per Instance Custom Data node for that exact index.
+	 */
+	TArray<TSet<int32>> MaterialPICDIndices;
+
+	const int32 NumMaterials = Component->GetNumMaterials();
+
+	for (int32 MaterialIndex = 0;
+	     MaterialIndex < NumMaterials;
+	     ++MaterialIndex)
+	{
+		UMaterialInterface* Material =
+			Component->GetMaterial(MaterialIndex);
+
+		TSet<int32> Indices;
+
+		if (Material)
+		{
+			TArray<int32> FoundIndices;
+
+			FSMtoISMConverter::MaterialHasPerInstanceCustomData(
+			                                                    Material,
+			                                                    &FoundIndices
+			                                                   );
+
+			for (const int32 Index : FoundIndices) { Indices.Add(Index); }
+		}
+
+		MaterialPICDIndices.Add(MoveTemp(Indices));
+	}
+
+	/*
+	 * Evaluate every CPD index independently.
+	 */
+	for (int32 CPDIndex = 0;
+	     CPDIndex < NumCPD;
+	     ++CPDIndex)
+	{
+		bool bPerInstanceForAllMaterials = true;
+
+		/*
+		 * If there are no material slots, treat the data as
+		 * component-level.
+		 */
+		if (MaterialPICDIndices.Num() == 0) { bPerInstanceForAllMaterials = false; }
+
+		for (const TSet<int32>& MaterialIndices : MaterialPICDIndices)
+		{
+			if (!MaterialIndices.Contains(CPDIndex))
+			{
+				bPerInstanceForAllMaterials = false;
+				break;
+			}
+		}
+
+		if (bPerInstanceForAllMaterials) { OutPerInstanceIndices.Add(CPDIndex); }
+		else { OutComponentIndices.Add(CPDIndex); }
 	}
 }

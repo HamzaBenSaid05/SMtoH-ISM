@@ -1,6 +1,14 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
 #pragma once
 
 #include "CoreMinimal.h"
+
+class UStaticMesh;
+class UMaterialInterface;
+class ULevel;
+class UStaticMeshComponent;
+class AActor;
 
 /**
  * Settings structure for converting Static Meshes to Instanced Static Meshes (ISM).
@@ -138,6 +146,9 @@ struct FHISMGroupKey
 	/** Custom Data Object (CDO) number for the group. */
 	int32 CDONum = 0;
 
+	/** Array of component-level values for the group. */
+	TArray<float> ComponentLevelValues;
+
 	/**
 	 * Equality operator for comparing two HISM group keys.
 	 *
@@ -158,7 +169,10 @@ struct FHISMGroupKey
 		B.Sort([](UMaterialInterface& X, UMaterialInterface& Y) { return &X < &Y; });
 		for (int32 i = 0; i < A.Num(); ++i)
 			if (A[i] != B[i]) return false;
-
+		if (ComponentLevelValues.Num() != Other.ComponentLevelValues.Num()) return false;
+		for (int32 i = 0; i < ComponentLevelValues.Num(); ++i)
+			if (!FMath::IsNearlyEqual(ComponentLevelValues[i], Other.ComponentLevelValues[i]))
+				return false;
 		return true;
 	}
 };
@@ -183,7 +197,9 @@ public:
 	 * @param Settings The settings for the conversion process.
 	 * @return The result of the conversion process.
 	 */
-	static FSMtoISMResult Convert(const FSMtoISMSettings& Settings = FSMtoISMSettings());
+	static FSMtoISMResult Convert(
+		const FSMtoISMSettings& Settings = FSMtoISMSettings()
+	);
 
 	/**
 	 * Reverts Instanced Static Meshes (ISM) to Static Mesh actors.
@@ -191,7 +207,9 @@ public:
 	 * @param Settings The settings for the reversion process.
 	 * @return The result of the reversion process.
 	 */
-	static FISMtoSMResult ConvertBack(const FISMtoSMSettings& Settings = FISMtoSMSettings());
+	static FISMtoSMResult ConvertBack(
+		const FISMtoSMSettings& Settings = FISMtoSMSettings()
+	);
 
 	/**
 	 * Ensures that the given material supports instancing.
@@ -199,5 +217,37 @@ public:
 	 * @param Mat The material to check.
 	 * @param OutResult The result structure to store any log messages.
 	 */
-	static void EnsureMaterialSupportsInstancing(UMaterialInterface* Mat, FSMtoISMResult& OutResult);
+	static void EnsureMaterialSupportsInstancing(
+		UMaterialInterface* Mat,
+		FSMtoISMResult& OutResult
+	);
+
+	static bool MaterialHasPerInstanceCustomData(
+		UMaterialInterface* Material,
+		TArray<int32>* OutDataIndices = nullptr
+	);
+
+	static bool ValidateMaterialCustomData(
+		UMaterialInterface* Material,
+		const TSet<int32>& RequiredIndices,
+		TArray<int32>& OutMissingIndices
+	);
+
+	static bool ValidateActorMaterials(
+		AActor* Actor,
+		const TSet<int32>& RequiredIndices,
+		TArray<FString>& OutWarnings
+	);
+
+	static bool ValidateSelectedMaterials(
+		const TArray<AActor*>& Actors,
+		const TSet<int32>& RequiredIndices,
+		TArray<FString>& OutWarnings
+	);
+
+	static void DetermineCPDDataModes(
+		UStaticMeshComponent* Component,
+		int32 NumCPD,
+		TArray<int32>& OutPerInstanceIndices,
+		TArray<int32>& OutComponentIndices);
 };

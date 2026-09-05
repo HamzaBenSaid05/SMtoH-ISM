@@ -9,7 +9,7 @@
  */
 USTRUCT(BlueprintType)
 struct FSMtoISMSettingsBP
-{
+{	
 	GENERATED_BODY()
 
 	/** Whether to read data from the source actors. */

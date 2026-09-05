@@ -41,7 +41,8 @@ public class SMConverter : ModuleRules
 				"UnrealEd",
 				"EditorSubsystem",
 				"LevelEditor",
-				"ToolMenus"
+				"ToolMenus",
+				"Projects"
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);
