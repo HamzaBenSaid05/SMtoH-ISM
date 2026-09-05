@@ -17,7 +17,6 @@
 #include "Materials/MaterialExpressionPerInstanceCustomData.h"
 #include "SMConvertedCPDComponent.h"
 
-
 // ---------------------------------------------------------------------------
 // Internal Snapshot
 // ---------------------------------------------------------------------------
@@ -119,11 +118,11 @@ static FSMSnapshot SnapshotActor(UStaticMeshComponent* C)
 	 * after conversion.
 	 */
 	FSMtoISMConverter::DetermineCPDDataModes(
-	                      C,
-	                      NumCPD,
-	                      S.PerInstanceDataIndices,
-	                      S.ComponentDataIndices
-	                     );
+	                                         C,
+	                                         NumCPD,
+	                                         S.PerInstanceDataIndices,
+	                                         S.ComponentDataIndices
+	                                        );
 	return S;
 }
 
@@ -257,12 +256,14 @@ FORCEINLINE uint32 GetTypeHash(const FHISMGroupKey& K)
 }
 
 // ============================================================================
-// Sostituiscono interamente Convert() e ConvertBack() in SMtoISMConverter.cpp
-// Richiede l'header/cpp aggiornati di SMConvertedCPDComponent.
-// Le parti invariate rispetto alla versione attuale sono lasciate identiche;
-// i blocchi NUOVI sono marcati con "// >>> NUOVO".
+// Convert from StaticMeshActor to ISM/HISM
 // ============================================================================
-
+/**
+ * Converts selected Static Mesh Actors to Instanced Static Mesh (ISM) or Hierarchical Instanced Static Mesh (HISM) components.
+ *
+ * @param Cfg The settings for the conversion process.
+ * @return A result structure containing information about the conversion.
+ */
 FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 {
 	FSMtoISMResult Result;
@@ -383,10 +384,7 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 		 */
 		for (const int32 CPDIndex : Snap.ComponentDataIndices)
 		{
-			if (Snap.CustomDataFloats.IsValidIndex(CPDIndex))
-			{
-				Key.ComponentLevelValues.Add(Snap.CustomDataFloats[CPDIndex]);
-			}
+			if (Snap.CustomDataFloats.IsValidIndex(CPDIndex)) { Key.ComponentLevelValues.Add(Snap.CustomDataFloats[CPDIndex]); }
 			else { Key.ComponentLevelValues.Add(0.f); }
 		}
 
@@ -417,15 +415,12 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 			}
 
 			Container->SetActorLabel(
-				Cfg.bUseHISM
-					? FString::Printf(TEXT("HISM_%s"), *Snap.Mesh->GetName())
-					: FString::Printf(TEXT("ISM_%s"), *Snap.Mesh->GetName())
-			);
-			
-			for (UMaterialInterface* Mat : Snap.Materials)
-			{
-				EnsureMaterialSupportsInstancing(Mat, Result);
-			}
+			                         Cfg.bUseHISM
+				                         ? FString::Printf(TEXT("HISM_%s"), *Snap.Mesh->GetName())
+				                         : FString::Printf(TEXT("ISM_%s"), *Snap.Mesh->GetName())
+			                        );
+
+			for (UMaterialInterface* Mat : Snap.Materials) { EnsureMaterialSupportsInstancing(Mat, Result); }
 
 			// Create root component
 			USceneComponent* Root = NewObject<USceneComponent>(Container, TEXT("Root"));
@@ -521,10 +516,7 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 				for (int32 k = 0; k < Snap.ComponentDataIndices.Num(); ++k)
 				{
 					const int32 CPDIndex = Snap.ComponentDataIndices[k];
-					if (BakedValues.IsValidIndex(CPDIndex))
-					{
-						BakedValues[CPDIndex] = Key.ComponentLevelValues[k];
-					}
+					if (BakedValues.IsValidIndex(CPDIndex)) { BakedValues[CPDIndex] = Key.ComponentLevelValues[k]; }
 				}
 
 				USMConvertedCPDComponent* CPDComp =
@@ -534,8 +526,8 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 				Container->AddInstanceComponent(CPDComp);
 
 				Result.Log.Add(FString::Printf(
-					TEXT("[OK] Attached persistent CPD holder to %s (%d component-level value(s))."),
-					*Container->GetActorLabel(), Key.ComponentLevelValues.Num()));
+				                               TEXT("[OK] Attached persistent CPD holder to %s (%d component-level value(s))."),
+				                               *Container->GetActorLabel(), Key.ComponentLevelValues.Num()));
 			}
 			// <<< FINE NUOVO --------------------------------------------------
 		}
@@ -666,6 +658,13 @@ FSMtoISMResult FSMtoISMConverter::Convert(const FSMtoISMSettings& Cfg)
 // ---------------------------------------------------------------------------
 // Convert Back from ISM/HISM to a StaticMeshActor
 // ---------------------------------------------------------------------------
+/**
+ * Converts Instanced Static Mesh (ISM) or Hierarchical Instanced Static Mesh (HISM)
+ * components back to individual Static Mesh Actors.
+ *
+ * @param Cfg The settings for the conversion process.
+ * @return A result structure containing information about the conversion.
+ */
 FISMtoSMResult FSMtoISMConverter::ConvertBack(const FISMtoSMSettings& Cfg)
 {
 	FISMtoSMResult Result;
@@ -776,16 +775,13 @@ FISMtoSMResult FSMtoISMConverter::ConvertBack(const FISMtoSMSettings& Cfg)
 
 			for (int32 j = 0; j < NumCPD; ++j)
 			{
-				if (ComponentIndexSet.Contains(j))
-				{
-					BakedValues[j] = CompCPD.Data.IsValidIndex(j) ? CompCPD.Data[j] : 0.f;
-				}
+				if (ComponentIndexSet.Contains(j)) { BakedValues[j] = CompCPD.Data.IsValidIndex(j) ? CompCPD.Data[j] : 0.f; }
 				else
 				{
 					const int32 FlatIndex = i * NumCPD + j;
 					BakedValues[j] = Comp->PerInstanceSMCustomData.IsValidIndex(FlatIndex)
-						                  ? Comp->PerInstanceSMCustomData[FlatIndex]
-						                  : 0.f;
+						                 ? Comp->PerInstanceSMCustomData[FlatIndex]
+						                 : 0.f;
 				}
 			}
 
@@ -874,7 +870,13 @@ void FSMtoISMConverter::EnsureMaterialSupportsInstancing(UMaterialInterface* Mat
 // ---------------------------------------------------------------------------
 // Material Per Instance Custom Data validation
 // ---------------------------------------------------------------------------
-
+/**
+ * Checks if a given material contains any Per Instance Custom Data expressions and optionally retrieves their indices.
+ *
+ * @param Material The material interface to check.
+ * @param OutDataIndices An optional array to store the indices of found Per Instance Custom Data expressions.
+ * @return True if the material contains any Per Instance Custom Data expressions, false otherwise.
+ */
 bool FSMtoISMConverter::MaterialHasPerInstanceCustomData(
 	UMaterialInterface* Material,
 	TArray<int32>* OutDataIndices)
@@ -928,7 +930,14 @@ bool FSMtoISMConverter::MaterialHasPerInstanceCustomData(
 // ---------------------------------------------------------------------------
 // Validate a material against the CPD indices that will actually be copied
 // ---------------------------------------------------------------------------
-
+/**
+ * Validates whether a given material contains all required Custom Primitive Data (CPD) indices.
+ *
+ * @param Material The material interface to validate.
+ * @param RequiredIndices The set of required CPD indices that must be present in the material.
+ * @param OutMissingIndices An array that will be filled with any missing CPD indices found in the material.
+ * @return True if the material contains all required CPD indices, false if any are missing.
+ */
 bool FSMtoISMConverter::ValidateMaterialCustomData(
 	UMaterialInterface* Material,
 	const TSet<int32>& RequiredIndices,
@@ -970,7 +979,14 @@ bool FSMtoISMConverter::ValidateMaterialCustomData(
 // ---------------------------------------------------------------------------
 // Validate all materials used by an Actor
 // ---------------------------------------------------------------------------
-
+/**
+ * Validates the materials of a given actor against the required Custom Primitive Data (CPD) indices.
+ *
+ * @param Actor The actor whose materials are to be validated.
+ * @param RequiredIndices The set of required CPD indices that must be present in the materials.
+ * @param OutWarnings An array that will be filled with warning messages for any validation issues found.
+ * @return True if all materials are valid, false if any issues were found.
+ */
 bool FSMtoISMConverter::ValidateActorMaterials(
 	AActor* Actor,
 	const TSet<int32>& RequiredIndices,
@@ -1107,7 +1123,14 @@ bool FSMtoISMConverter::ValidateActorMaterials(
 // ---------------------------------------------------------------------------
 // Validate all selected Actors
 // ---------------------------------------------------------------------------
-
+/**
+ * Validates the materials of all selected actors against the required Custom Primitive Data (CPD) indices.
+ *
+ * @param Actors The array of actors to validate.
+ * @param RequiredIndices The set of required CPD indices that must be present in the materials.
+ * @param OutWarnings An array that will be filled with warning messages for any validation issues found.
+ * @return True if all materials are valid, false if any issues were found.
+ */
 bool FSMtoISMConverter::ValidateSelectedMaterials(
 	const TArray<AActor*>& Actors,
 	const TSet<int32>& RequiredIndices,
@@ -1184,6 +1207,17 @@ bool FSMtoISMConverter::ValidateSelectedMaterials(
 	return bAllValid;
 }
 
+// ---------------------------------------------------------------------------
+// Determine which CPD indices are PerInstance and which are Component-level
+// ---------------------------------------------------------------------------
+/**
+ * Determines which Custom Primitive Data (CPD) indices are PerInstance and which are Component-level for a given Static Mesh Component.
+ *
+ * @param Component The Static Mesh Component to analyze.
+ * @param NumCPD The total number of CPD indices to evaluate.
+ * @param OutPerInstanceIndices An array that will be filled with the indices that are PerInstance.
+ * @param OutComponentIndices An array that will be filled with the indices that are Component-level.
+ */
 void FSMtoISMConverter::DetermineCPDDataModes(UStaticMeshComponent* Component, int32 NumCPD, TArray<int32>& OutPerInstanceIndices,
                                               TArray<int32>& OutComponentIndices)
 {
