@@ -1,4 +1,4 @@
-# SM to H/ISM Converter
+# SM to H-ISM Converter
 
 Unreal Engine editor plugin that converts selected Static Mesh Actors into
 Instanced Static Mesh (ISM) or Hierarchical Instanced Static Mesh (HISM)
